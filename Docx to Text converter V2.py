@@ -1,6 +1,8 @@
 import os
 import re
 import fnmatch
+import zipfile
+import numpy as np
 from docx import Document
 from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -30,11 +32,15 @@ INCLUDE_DOCX_FILES = True
 INCLUDE_PY_FILES   = True
 INCLUDE_TXT_FILES  = True
 INCLUDE_PDF_FILES  = False
+INCLUDE_NPZ_FILES  = False
+INCLUDE_ZIP_FILES  = False
 
 INCLUDE_DOCX_TEXT  = True
 INCLUDE_PY_TEXT    = True
 INCLUDE_TXT_TEXT   = True
 INCLUDE_PDF_TEXT   = False
+INCLUDE_NPZ_TEXT   = False
+INCLUDE_ZIP_TEXT   = False
 
 ONLY_FILENAME = True
 REDACT_ABS_PATHS_IN_TEXT = True
@@ -141,6 +147,44 @@ def extract_pdf_text(path: str) -> str:
     except Exception as e:
         return f"[ERROR reading PDF: {e}]"
 
+
+def extract_npz_text(path: str) -> str:
+    """
+    Build a lightweight text summary of NPZ contents (arrays + shapes/dtypes).
+    """
+    try:
+        with np.load(path, allow_pickle=False) as data:
+            if len(data.files) == 0:
+                return "[EMPTY NPZ: no arrays found]"
+            lines = ["NPZ CONTENT SUMMARY:"]
+            for key in data.files:
+                arr = data[key]
+                lines.append(
+                    f"- {key}: shape={arr.shape}, dtype={arr.dtype}, size={arr.size}"
+                )
+            return "\n".join(lines)
+    except Exception as e:
+        return f"[ERROR reading NPZ: {e}]"
+
+
+def extract_zip_text(path: str) -> str:
+    """
+    Build a lightweight text summary of ZIP archive entries.
+    """
+    try:
+        with zipfile.ZipFile(path, "r") as zf:
+            infos = zf.infolist()
+            if not infos:
+                return "[EMPTY ZIP: no files found]"
+
+            lines = ["ZIP CONTENT SUMMARY:"]
+            for info in infos:
+                kind = "dir" if info.is_dir() else "file"
+                lines.append(f"- {info.filename} ({kind}, {info.file_size} bytes)")
+            return "\n".join(lines)
+    except Exception as e:
+        return f"[ERROR reading ZIP: {e}]"
+
 # -----------------------------------------------------------------------------
 # Matching + redaction helpers
 # -----------------------------------------------------------------------------
@@ -240,6 +284,18 @@ def process_one(index: int, ts: float, path: str):
         txt = finalize(txt)
         return (index, ts, path, "PDF", txt + "\n", "ok")
 
+    if lower.endswith(".npz"):
+        if not INCLUDE_NPZ_TEXT:
+            return (index, ts, path, "NPZ", "[NPZ CONTENT OMITTED]\n", "omitted")
+        txt = finalize(extract_npz_text(path))
+        return (index, ts, path, "NPZ", txt + "\n", "ok")
+
+    if lower.endswith(".zip"):
+        if not INCLUDE_ZIP_TEXT:
+            return (index, ts, path, "ZIP", "[ZIP CONTENT OMITTED]\n", "omitted")
+        txt = finalize(extract_zip_text(path))
+        return (index, ts, path, "ZIP", txt + "\n", "ok")
+
     return (index, ts, path, "UNKNOWN", "[UNSUPPORTED FILE TYPE]\n", "omitted")
 
 # -----------------------------------------------------------------------------
@@ -255,10 +311,14 @@ def build_log_settings_text() -> str:
         f"include_py_files   = {INCLUDE_PY_FILES}\n"
         f"include_txt_files  = {INCLUDE_TXT_FILES}\n"
         f"include_pdf_files  = {INCLUDE_PDF_FILES}\n"
+        f"include_npz_files  = {INCLUDE_NPZ_FILES}\n"
+        f"include_zip_files  = {INCLUDE_ZIP_FILES}\n"
         f"include_docx_text  = {INCLUDE_DOCX_TEXT}\n"
         f"include_py_text    = {INCLUDE_PY_TEXT}\n"
         f"include_txt_text   = {INCLUDE_TXT_TEXT}\n"
         f"include_pdf_text   = {INCLUDE_PDF_TEXT}\n"
+        f"include_npz_text   = {INCLUDE_NPZ_TEXT}\n"
+        f"include_zip_text   = {INCLUDE_ZIP_TEXT}\n"
         f"only_filename      = {ONLY_FILENAME}\n"
         f"time_mode          = {TIME_MODE}\n"
         f"num_workers        = {NUM_WORKERS}\n"
@@ -315,7 +375,9 @@ def main():
                 (INCLUDE_DOCX_FILES and lower.endswith(".docx")) or
                 (INCLUDE_PY_FILES   and lower.endswith(".py"))   or
                 (INCLUDE_TXT_FILES  and lower.endswith(".txt"))  or
-                (INCLUDE_PDF_FILES  and lower.endswith(".pdf"))
+                (INCLUDE_PDF_FILES  and lower.endswith(".pdf"))  or
+                (INCLUDE_NPZ_FILES  and lower.endswith(".npz"))  or
+                (INCLUDE_ZIP_FILES  and lower.endswith(".zip"))
             ):
                 continue
 
@@ -353,7 +415,7 @@ def main():
         current_bytes = header_bytes
 
     # Counts
-    docx_count = py_count = txt_count = pdf_count = 0
+    docx_count = py_count = txt_count = pdf_count = npz_count = zip_count = 0
     pdf_skipped_no_text = 0
 
     # Submit work with stable indices so we can write in chronological order
@@ -401,6 +463,10 @@ def main():
                         pdf_count += 1
                     elif status_w == "skipped_no_text":
                         pdf_skipped_no_text += 1
+                elif type_w == "NPZ":
+                    npz_count += 1
+                elif type_w == "ZIP":
+                    zip_count += 1
 
                 next_idx_to_write += 1
 
@@ -408,7 +474,7 @@ def main():
 
     print(
         f"Done! Wrote {docx_count} DOCX, {py_count} PY, {txt_count} TXT, "
-        f"and {pdf_count} PDF (text) entries."
+        f"{pdf_count} PDF (text), {npz_count} NPZ, and {zip_count} ZIP entries."
     )
     if pdf_skipped_no_text:
         print(f"Skipped {pdf_skipped_no_text} PDF(s) with no extractable text.")
