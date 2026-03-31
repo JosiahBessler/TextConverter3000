@@ -82,5 +82,18 @@ These defaults are intended to keep logs readable and avoid dumping large binary
 3. Run the script after a coding session.
 4. Keep generated output parts as your timestamped development trail.
 
+
+## Great for AI-assisted research workflows
+A practical use case is compiling an entire project/research directory into chronological output parts, then feeding those parts to an AI assistant one at a time for analysis.
+
+Because output is already split into `Output_data_partXXX.txt` files, it works well with context-window limits and helps AI tools review development history in sequence.
+
+Typical pattern:
+1. Run this tool on your workspace or dataset folder.
+2. Upload `Output_data_part001.txt`, then part 2, part 3, etc. to your AI assistant.
+3. Ask for summaries, timeline reconstruction, research notes, or implementation review across the full history.
+
+This makes TextConverter3000 especially useful for research projects where reproducibility and traceable iteration matter.
+
 ## License / open-source use
 This project is suitable for open-source use as a lightweight project process logger. If you plan to share logs publicly, review redaction settings before generating output.
