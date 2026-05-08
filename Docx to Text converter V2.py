@@ -1,19 +1,34 @@
+import ast
+import importlib.util
 import os
 import re
 import fnmatch
-from docx import Document
-from tqdm import tqdm
+import struct
+import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# ---- Optional dependency setup ----------------------------------------------
+# pip install python-docx tqdm pypdf
+if importlib.util.find_spec("docx") is not None:
+    from docx import Document
+else:
+    Document = None
+
+if importlib.util.find_spec("tqdm") is not None:
+    from tqdm import tqdm
+else:
+    def tqdm(iterable, **_kwargs):
+        return iterable
 
 # ---- PDF extraction (extractable text only) ---------------------------------
 # pip install pypdf
-try:
+if importlib.util.find_spec("pypdf") is not None:
     from pypdf import PdfReader
-except Exception:
+else:
     PdfReader = None
 
 # =============================================================================
-# Repo-safe Chronological DOCX/PY/TXT/PDF Log Extractor (Recursive, Threaded)
+# Repo-safe Chronological DOCX/PY/TXT/MD/PDF Log Extractor (Recursive, Threaded)
 # =============================================================================
 
 TIME_MODE = "ctime"  # "ctime" or "mtime"
@@ -29,12 +44,18 @@ NUM_WORKERS = 12
 INCLUDE_DOCX_FILES = True
 INCLUDE_PY_FILES   = True
 INCLUDE_TXT_FILES  = True
+INCLUDE_MD_FILES   = True
 INCLUDE_PDF_FILES  = False
+INCLUDE_NPZ_FILES  = False
+INCLUDE_ZIP_FILES  = False
 
 INCLUDE_DOCX_TEXT  = True
 INCLUDE_PY_TEXT    = True
 INCLUDE_TXT_TEXT   = True
+INCLUDE_MD_TEXT    = True
 INCLUDE_PDF_TEXT   = False
+INCLUDE_NPZ_TEXT   = False
+INCLUDE_ZIP_TEXT   = False
 
 ONLY_FILENAME = True
 REDACT_ABS_PATHS_IN_TEXT = True
@@ -77,6 +98,9 @@ RE_UNC = re.compile(r"\\\\[^\s\"\'<>|]+\\[^\s\"\'<>|]+(?:\\[^\s\"\'<>|]+)*")
 # Extraction helpers
 # -----------------------------------------------------------------------------
 def extract_docx_text(path: str) -> str:
+    if Document is None:
+        return "[ERROR reading DOCX: missing dependency 'python-docx'. Install with: pip install python-docx]"
+
     try:
         doc = Document(path)
         return "\n".join(p.text for p in doc.paragraphs)
@@ -109,6 +133,20 @@ def extract_txt_text(path: str) -> str:
     except Exception as e:
         return f"[ERROR reading TXT: {e}]"
 
+
+def extract_md_text(path: str) -> str:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
+    except UnicodeDecodeError:
+        try:
+            with open(path, "r", encoding="latin-1") as f:
+                return f.read()
+        except Exception as e:
+            return f"[ERROR reading MD (latin-1 fallback failed): {e}]"
+    except Exception as e:
+        return f"[ERROR reading MD: {e}]"
+
 def extract_pdf_text(path: str) -> str:
     """
     Extracts full text from PDFs *only if* the PDF has extractable text.
@@ -140,6 +178,87 @@ def extract_pdf_text(path: str) -> str:
         return full
     except Exception as e:
         return f"[ERROR reading PDF: {e}]"
+
+
+def parse_npy_header_from_npz_member(member) -> dict:
+    magic = member.read(6)
+    if magic != b"\x93NUMPY":
+        return {}
+
+    major, minor = member.read(2)
+    if (major, minor) == (1, 0):
+        header_len = struct.unpack("<H", member.read(2))[0]
+    else:
+        header_len = struct.unpack("<I", member.read(4))[0]
+
+    header_text = member.read(header_len).decode("latin-1").strip()
+    return ast.literal_eval(header_text)
+
+
+def format_shape(shape) -> str:
+    if isinstance(shape, tuple):
+        return str(shape)
+    return "unknown"
+
+
+def shape_size(shape) -> str:
+    if not isinstance(shape, tuple):
+        return "unknown"
+
+    size = 1
+    for dim in shape:
+        size *= dim
+    return str(size)
+
+
+def extract_npz_text(path: str) -> str:
+    """
+    Build a lightweight text summary of NPZ contents (arrays + shapes/dtypes).
+    """
+    try:
+        with zipfile.ZipFile(path, "r") as zf:
+            infos = [info for info in zf.infolist() if not info.is_dir()]
+            if not infos:
+                return "[EMPTY NPZ: no arrays found]"
+
+            lines = ["NPZ CONTENT SUMMARY:"]
+            for info in infos:
+                key = info.filename[:-4] if info.filename.endswith(".npy") else info.filename
+                with zf.open(info, "r") as member:
+                    header = parse_npy_header_from_npz_member(member)
+
+                if header:
+                    shape = header.get("shape")
+                    dtype = header.get("descr", "unknown")
+                    lines.append(
+                        f"- {key}: shape={format_shape(shape)}, dtype={dtype}, "
+                        f"size={shape_size(shape)}"
+                    )
+                else:
+                    lines.append(f"- {key}: {info.file_size} bytes")
+
+            return "\n".join(lines)
+    except Exception as e:
+        return f"[ERROR reading NPZ: {e}]"
+
+
+def extract_zip_text(path: str) -> str:
+    """
+    Build a lightweight text summary of ZIP archive entries.
+    """
+    try:
+        with zipfile.ZipFile(path, "r") as zf:
+            infos = zf.infolist()
+            if not infos:
+                return "[EMPTY ZIP: no files found]"
+
+            lines = ["ZIP CONTENT SUMMARY:"]
+            for info in infos:
+                kind = "dir" if info.is_dir() else "file"
+                lines.append(f"- {info.filename} ({kind}, {info.file_size} bytes)")
+            return "\n".join(lines)
+    except Exception as e:
+        return f"[ERROR reading ZIP: {e}]"
 
 # -----------------------------------------------------------------------------
 # Matching + redaction helpers
@@ -231,6 +350,12 @@ def process_one(index: int, ts: float, path: str):
         txt = finalize(extract_txt_text(path))
         return (index, ts, path, "TEXT", txt + "\n", "ok")
 
+    if lower.endswith(".md"):
+        if not INCLUDE_MD_TEXT:
+            return (index, ts, path, "MARKDOWN", "[MD CONTENT OMITTED]\n", "omitted")
+        txt = finalize(extract_md_text(path))
+        return (index, ts, path, "MARKDOWN", txt + "\n", "ok")
+
     if lower.endswith(".pdf"):
         if not INCLUDE_PDF_TEXT:
             return (index, ts, path, "PDF", "[PDF CONTENT OMITTED]\n", "omitted")
@@ -239,6 +364,18 @@ def process_one(index: int, ts: float, path: str):
             return (index, ts, path, "PDF", "[PDF SKIPPED: no meaningful extractable text detected]\n", "skipped_no_text")
         txt = finalize(txt)
         return (index, ts, path, "PDF", txt + "\n", "ok")
+
+    if lower.endswith(".npz"):
+        if not INCLUDE_NPZ_TEXT:
+            return (index, ts, path, "NPZ", "[NPZ CONTENT OMITTED]\n", "omitted")
+        txt = finalize(extract_npz_text(path))
+        return (index, ts, path, "NPZ", txt + "\n", "ok")
+
+    if lower.endswith(".zip"):
+        if not INCLUDE_ZIP_TEXT:
+            return (index, ts, path, "ZIP", "[ZIP CONTENT OMITTED]\n", "omitted")
+        txt = finalize(extract_zip_text(path))
+        return (index, ts, path, "ZIP", txt + "\n", "ok")
 
     return (index, ts, path, "UNKNOWN", "[UNSUPPORTED FILE TYPE]\n", "omitted")
 
@@ -254,11 +391,17 @@ def build_log_settings_text() -> str:
         f"include_docx_files = {INCLUDE_DOCX_FILES}\n"
         f"include_py_files   = {INCLUDE_PY_FILES}\n"
         f"include_txt_files  = {INCLUDE_TXT_FILES}\n"
+        f"include_md_files   = {INCLUDE_MD_FILES}\n"
         f"include_pdf_files  = {INCLUDE_PDF_FILES}\n"
+        f"include_npz_files  = {INCLUDE_NPZ_FILES}\n"
+        f"include_zip_files  = {INCLUDE_ZIP_FILES}\n"
         f"include_docx_text  = {INCLUDE_DOCX_TEXT}\n"
         f"include_py_text    = {INCLUDE_PY_TEXT}\n"
         f"include_txt_text   = {INCLUDE_TXT_TEXT}\n"
+        f"include_md_text    = {INCLUDE_MD_TEXT}\n"
         f"include_pdf_text   = {INCLUDE_PDF_TEXT}\n"
+        f"include_npz_text   = {INCLUDE_NPZ_TEXT}\n"
+        f"include_zip_text   = {INCLUDE_ZIP_TEXT}\n"
         f"only_filename      = {ONLY_FILENAME}\n"
         f"time_mode          = {TIME_MODE}\n"
         f"num_workers        = {NUM_WORKERS}\n"
@@ -315,7 +458,10 @@ def main():
                 (INCLUDE_DOCX_FILES and lower.endswith(".docx")) or
                 (INCLUDE_PY_FILES   and lower.endswith(".py"))   or
                 (INCLUDE_TXT_FILES  and lower.endswith(".txt"))  or
-                (INCLUDE_PDF_FILES  and lower.endswith(".pdf"))
+                (INCLUDE_MD_FILES   and lower.endswith(".md"))   or
+                (INCLUDE_PDF_FILES  and lower.endswith(".pdf"))  or
+                (INCLUDE_NPZ_FILES  and lower.endswith(".npz"))  or
+                (INCLUDE_ZIP_FILES  and lower.endswith(".zip"))
             ):
                 continue
 
@@ -353,7 +499,7 @@ def main():
         current_bytes = header_bytes
 
     # Counts
-    docx_count = py_count = txt_count = pdf_count = 0
+    docx_count = py_count = txt_count = md_count = pdf_count = npz_count = zip_count = 0
     pdf_skipped_no_text = 0
 
     # Submit work with stable indices so we can write in chronological order
@@ -396,11 +542,17 @@ def main():
                     py_count += 1
                 elif type_w == "TEXT":
                     txt_count += 1
+                elif type_w == "MARKDOWN":
+                    md_count += 1
                 elif type_w == "PDF":
                     if status_w == "ok":
                         pdf_count += 1
                     elif status_w == "skipped_no_text":
                         pdf_skipped_no_text += 1
+                elif type_w == "NPZ":
+                    npz_count += 1
+                elif type_w == "ZIP":
+                    zip_count += 1
 
                 next_idx_to_write += 1
 
@@ -408,7 +560,8 @@ def main():
 
     print(
         f"Done! Wrote {docx_count} DOCX, {py_count} PY, {txt_count} TXT, "
-        f"and {pdf_count} PDF (text) entries."
+        f"{md_count} MD, {pdf_count} PDF (text), {npz_count} NPZ, "
+        f"and {zip_count} ZIP entries."
     )
     if pdf_skipped_no_text:
         print(f"Skipped {pdf_skipped_no_text} PDF(s) with no extractable text.")
