@@ -28,7 +28,7 @@ else:
     PdfReader = None
 
 # =============================================================================
-# Repo-safe Chronological DOCX/PY/TXT/MD/PDF Log Extractor (Recursive, Threaded)
+# Repo-safe Chronological DOCX/PY/TXT/MD/CODE/PDF Log Extractor (Recursive, Threaded)
 # =============================================================================
 
 TIME_MODE = "ctime"  # "ctime" or "mtime"
@@ -45,6 +45,7 @@ INCLUDE_DOCX_FILES = True
 INCLUDE_PY_FILES   = True
 INCLUDE_TXT_FILES  = True
 INCLUDE_MD_FILES   = True
+INCLUDE_EXTRA_TEXT_FILES = True
 INCLUDE_PDF_FILES  = False
 INCLUDE_NPZ_FILES  = False
 INCLUDE_ZIP_FILES  = False
@@ -53,6 +54,7 @@ INCLUDE_DOCX_TEXT  = True
 INCLUDE_PY_TEXT    = True
 INCLUDE_TXT_TEXT   = True
 INCLUDE_MD_TEXT    = True
+INCLUDE_EXTRA_TEXT_TEXT = True
 INCLUDE_PDF_TEXT   = False
 INCLUDE_NPZ_TEXT   = False
 INCLUDE_ZIP_TEXT   = False
@@ -70,6 +72,25 @@ LEAKY_MARKERS = ["OneDrive", "\\Desktop\\", "/Desktop/"]
 # PDF behavior: include only if it yields meaningful extractable text
 PDF_MIN_NONWS_CHARS = 30
 PDF_MAX_PAGES = 0  # 0 = no limit; otherwise cap pages to extract (you said keep full, so keep 0)
+
+# Additional source/config/data formats that are normally plain text.
+# These are read only when they pass the text-file safety check below.
+EXTRA_TEXT_EXTENSIONS = (
+    ".sh", ".bash", ".zsh", ".fish",
+    ".json", ".jsonl", ".toml", ".yaml", ".yml", ".lock",
+    ".rs", ".js", ".jsx", ".ts", ".tsx",
+    ".html", ".htm", ".css", ".scss", ".xml",
+    ".csv", ".tsv", ".ini", ".cfg", ".conf", ".properties", ".gradle",
+    ".c", ".cc", ".cpp", ".h", ".hpp",
+    ".java", ".go", ".rb", ".php", ".sql",
+    ".r", ".jl", ".lua", ".swift", ".kt", ".scala",
+    ".ps1", ".bat", ".cmd",
+)
+EXTRA_TEXT_FILENAMES = (
+    "dockerfile", "makefile", "justfile", "procfile", "rakefile", "gemfile",
+)
+TEXT_BINARY_SAMPLE_BYTES = 8192
+MIN_TEXT_PRINTABLE_RATIO = 0.85
 
 FILE_EXCLUDES = [
     "*draft*", "*todo*", "*email*", "*notes*", "*journal*", "*brainstorm*",
@@ -146,6 +167,53 @@ def extract_md_text(path: str) -> str:
             return f"[ERROR reading MD (latin-1 fallback failed): {e}]"
     except Exception as e:
         return f"[ERROR reading MD: {e}]"
+
+
+def is_extra_text_file(name: str) -> bool:
+    lower_name = name.lower()
+    return lower_name.endswith(EXTRA_TEXT_EXTENSIONS) or lower_name in EXTRA_TEXT_FILENAMES
+
+
+def is_probably_text_file(path: str) -> bool:
+    try:
+        with open(path, "rb") as f:
+            sample = f.read(TEXT_BINARY_SAMPLE_BYTES)
+    except Exception:
+        return False
+
+    if not sample:
+        return True
+
+    if b"\x00" in sample:
+        return False
+
+    try:
+        decoded = sample.decode("utf-8")
+    except UnicodeDecodeError:
+        decoded = sample.decode("latin-1", errors="replace")
+
+    if not decoded:
+        return True
+
+    printable = sum(1 for ch in decoded if ch.isprintable() or ch in "\r\n\t")
+    return (printable / len(decoded)) >= MIN_TEXT_PRINTABLE_RATIO
+
+
+def extract_extra_text_file(path: str) -> str:
+    if not is_probably_text_file(path):
+        return ""
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
+    except UnicodeDecodeError:
+        try:
+            with open(path, "r", encoding="latin-1") as f:
+                return f.read()
+        except Exception as e:
+            return f"[ERROR reading EXTRA_TEXT (latin-1 fallback failed): {e}]"
+    except Exception as e:
+        return f"[ERROR reading EXTRA_TEXT: {e}]"
 
 def extract_pdf_text(path: str) -> str:
     """
@@ -356,6 +424,15 @@ def process_one(index: int, ts: float, path: str):
         txt = finalize(extract_md_text(path))
         return (index, ts, path, "MARKDOWN", txt + "\n", "ok")
 
+    if is_extra_text_file(lower):
+        if not INCLUDE_EXTRA_TEXT_TEXT:
+            return (index, ts, path, "EXTRA_TEXT", "[EXTRA TEXT CONTENT OMITTED]\n", "omitted")
+        txt = extract_extra_text_file(path)
+        if txt == "":
+            return (index, ts, path, "EXTRA_TEXT", "", "skipped_binary_text")
+        txt = finalize(txt)
+        return (index, ts, path, "EXTRA_TEXT", txt + "\n", "ok")
+
     if lower.endswith(".pdf"):
         if not INCLUDE_PDF_TEXT:
             return (index, ts, path, "PDF", "[PDF CONTENT OMITTED]\n", "omitted")
@@ -392,6 +469,7 @@ def build_log_settings_text() -> str:
         f"include_py_files   = {INCLUDE_PY_FILES}\n"
         f"include_txt_files  = {INCLUDE_TXT_FILES}\n"
         f"include_md_files   = {INCLUDE_MD_FILES}\n"
+        f"include_extra_text_files = {INCLUDE_EXTRA_TEXT_FILES}\n"
         f"include_pdf_files  = {INCLUDE_PDF_FILES}\n"
         f"include_npz_files  = {INCLUDE_NPZ_FILES}\n"
         f"include_zip_files  = {INCLUDE_ZIP_FILES}\n"
@@ -399,6 +477,7 @@ def build_log_settings_text() -> str:
         f"include_py_text    = {INCLUDE_PY_TEXT}\n"
         f"include_txt_text   = {INCLUDE_TXT_TEXT}\n"
         f"include_md_text    = {INCLUDE_MD_TEXT}\n"
+        f"include_extra_text_text = {INCLUDE_EXTRA_TEXT_TEXT}\n"
         f"include_pdf_text   = {INCLUDE_PDF_TEXT}\n"
         f"include_npz_text   = {INCLUDE_NPZ_TEXT}\n"
         f"include_zip_text   = {INCLUDE_ZIP_TEXT}\n"
@@ -406,6 +485,8 @@ def build_log_settings_text() -> str:
         f"time_mode          = {TIME_MODE}\n"
         f"num_workers        = {NUM_WORKERS}\n"
         f"max_output_mb      = {MAX_OUTPUT_TXT_SIZE_MB}\n"
+        f"extra_text_extensions = {', '.join(EXTRA_TEXT_EXTENSIONS)}\n"
+        f"extra_text_filenames = {', '.join(EXTRA_TEXT_FILENAMES)}\n"
         "================================================================================\n\n"
     )
 
@@ -459,6 +540,7 @@ def main():
                 (INCLUDE_PY_FILES   and lower.endswith(".py"))   or
                 (INCLUDE_TXT_FILES  and lower.endswith(".txt"))  or
                 (INCLUDE_MD_FILES   and lower.endswith(".md"))   or
+                (INCLUDE_EXTRA_TEXT_FILES and is_extra_text_file(lower)) or
                 (INCLUDE_PDF_FILES  and lower.endswith(".pdf"))  or
                 (INCLUDE_NPZ_FILES  and lower.endswith(".npz"))  or
                 (INCLUDE_ZIP_FILES  and lower.endswith(".zip"))
@@ -499,8 +581,9 @@ def main():
         current_bytes = header_bytes
 
     # Counts
-    docx_count = py_count = txt_count = md_count = pdf_count = npz_count = zip_count = 0
+    docx_count = py_count = txt_count = md_count = extra_text_count = pdf_count = npz_count = zip_count = 0
     pdf_skipped_no_text = 0
+    extra_text_skipped_binary = 0
 
     # Submit work with stable indices so we can write in chronological order
     futures = {}
@@ -525,6 +608,11 @@ def main():
             while next_idx_to_write in ready:
                 _, ts_w, path_w, type_w, content_w, status_w = ready.pop(next_idx_to_write)
 
+                if type_w == "EXTRA_TEXT" and status_w == "skipped_binary_text":
+                    extra_text_skipped_binary += 1
+                    next_idx_to_write += 1
+                    continue
+
                 entry = format_entry(ts_w, path_w, type_w, content_w)
                 entry_bytes = len(entry.encode("utf-8", errors="replace"))
 
@@ -544,6 +632,9 @@ def main():
                     txt_count += 1
                 elif type_w == "MARKDOWN":
                     md_count += 1
+                elif type_w == "EXTRA_TEXT":
+                    if status_w == "ok":
+                        extra_text_count += 1
                 elif type_w == "PDF":
                     if status_w == "ok":
                         pdf_count += 1
@@ -560,11 +651,13 @@ def main():
 
     print(
         f"Done! Wrote {docx_count} DOCX, {py_count} PY, {txt_count} TXT, "
-        f"{md_count} MD, {pdf_count} PDF (text), {npz_count} NPZ, "
-        f"and {zip_count} ZIP entries."
+        f"{md_count} MD, {extra_text_count} extra text/code/config, "
+        f"{pdf_count} PDF (text), {npz_count} NPZ, and {zip_count} ZIP entries."
     )
     if pdf_skipped_no_text:
         print(f"Skipped {pdf_skipped_no_text} PDF(s) with no extractable text.")
+    if extra_text_skipped_binary:
+        print(f"Skipped {extra_text_skipped_binary} extra text/code/config file(s) that looked binary or non-text.")
 
     print("\nOutput parts written:")
     for p in written_parts:

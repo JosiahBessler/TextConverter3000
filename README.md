@@ -16,6 +16,7 @@ The main script (`Docx to Text converter V2.py`) can include/extract from:
 - `.py`
 - `.txt`
 - `.md` / Markdown
+- additional text/code/config formats such as `.sh`, `.json`, `.rs`, `.toml`, `.yaml`, `.js`, `.ts`, `.html`, `.css`, `.csv`, `.ini`, `.lock`, `.properties`, `.c`, `.cpp`, `.java`, `.go`, `.sql`, `.ps1`, `.bat`, and common extensionless text files like `Dockerfile` and `Makefile`
 - `.pdf` (extractable text PDFs)
 - `.npz` (NumPy archive summary)
 - `.zip` (archive file listing summary)
@@ -23,7 +24,7 @@ The main script (`Docx to Text converter V2.py`) can include/extract from:
 ## Quick start
 
 ## 1) Install optional dependencies
-The script can process `.py`, `.txt`, `.md`, `.npz`, and `.zip` files with the Python standard library. Install these optional packages when you want DOCX/PDF extraction and progress bars:
+The script can process `.py`, `.txt`, `.md`, many additional text/code/config formats, `.npz`, and `.zip` files with the Python standard library. Install these optional packages when you want DOCX/PDF extraction and progress bars:
 
 ```bash
 pip install python-docx tqdm pypdf
@@ -52,6 +53,7 @@ Set these booleans near the top of the script:
 - `INCLUDE_PY_FILES`
 - `INCLUDE_TXT_FILES`
 - `INCLUDE_MD_FILES`
+- `INCLUDE_EXTRA_TEXT_FILES`
 - `INCLUDE_PDF_FILES`
 - `INCLUDE_NPZ_FILES`
 - `INCLUDE_ZIP_FILES`
@@ -61,6 +63,7 @@ Set these booleans near the top of the script:
 - `INCLUDE_PY_TEXT`
 - `INCLUDE_TXT_TEXT`
 - `INCLUDE_MD_TEXT`
+- `INCLUDE_EXTRA_TEXT_TEXT`
 - `INCLUDE_PDF_TEXT`
 - `INCLUDE_NPZ_TEXT`
 - `INCLUDE_ZIP_TEXT`
@@ -74,12 +77,20 @@ If a file type is enabled but text extraction is disabled, the file is still log
 - `ONLY_FILENAME`: hides directory path and logs only file names.
 - `REDACT_ABS_PATHS_IN_TEXT`: redacts Windows/UNC absolute paths in extracted text.
 - `FILE_EXCLUDES` / `FOLDER_EXCLUDES`: pattern-based filtering.
+- `EXTRA_TEXT_EXTENSIONS`: controls the additional text/code/config extensions (`.sh`, `.json`, `.rs`, `.toml`, etc.) that are scanned when `INCLUDE_EXTRA_TEXT_FILES` is enabled.
+- `EXTRA_TEXT_FILENAMES`: controls supported extensionless text file names such as `Dockerfile`, `Makefile`, `Justfile`, and `Procfile`.
+- `TEXT_BINARY_SAMPLE_BYTES` / `MIN_TEXT_PRINTABLE_RATIO`: safety heuristics used to skip extra text/code/config files that appear binary or non-text.
 
 ## Notes on NPZ and ZIP handling
 - **NPZ**: the tool logs an array summary (array key, shape, dtype, size), not raw binary payload. This uses Python standard-library ZIP/NPY header parsing, so NumPy is not required just to summarize NPZ files.
 - **ZIP**: the tool logs archive entry names and sizes, not file contents.
 
 These defaults are intended to keep logs readable and avoid dumping large binary data into text output.
+
+## Notes on extra text/code/config handling
+The extra text/code/config switch is designed for source files and structured text data such as shell scripts, JSON, Rust, TOML, YAML, JavaScript/TypeScript, HTML/CSS, CSV, INI/config files, C/C++, Java, Go, SQL, PowerShell, batch scripts, lockfiles, properties files, Dockerfiles, and Makefiles.
+
+Before extracting these files, the tool samples the file bytes and skips files with null bytes or too many non-printable characters. This keeps binary files from being accidentally copied into the output just because they use a familiar extension.
 
 ## Typical workflow
 1. Enable the file types you want.
